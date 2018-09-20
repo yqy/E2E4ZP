@@ -6,6 +6,9 @@ feature_dimention = 16
 hidden_dimention = 256
 max_width = 5
 
-epoch = 10
+epoch = 100
 batch_size = 256
-dropout = 0.5
+dropout = 0.1
+lr = 0.0009
+#lr = 0.00009
+#lr = 0.003

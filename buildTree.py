@@ -151,4 +151,4 @@ def main(files):
 
 if __name__ == "__main__":
     main("./data/test_list")
-    main("./data/train_list")
+    #main("./data/train_list")

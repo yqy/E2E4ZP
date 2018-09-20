@@ -53,7 +53,10 @@ class Network(nn.Module):
         self.hidden_score_layer_1 = nn.Linear(hidden_dimention*2,hidden_dimention)
         self.hidden_score_layer_2 = nn.Linear(hidden_dimention,1)
 
-        self.activate = nn.ReLU()
+        self.zp_x_layer = nn.Linear(self.hidden_dimention*4,1)
+
+        #self.activate = nn.ReLU()
+        self.activate = nn.Tanh()
 
     def encode_zp(self, zp_in, dropout=0.0):
         dropout_layer = nn.Dropout(dropout)
@@ -61,9 +64,10 @@ class Network(nn.Module):
         this_hidden = self.activate(this_hidden)
         this_hidden = dropout_layer(this_hidden)
         this_hidden = self.zp_pre_representation_layer_2(this_hidden)
-        this_hidden = self.activate(this_hidden)
-        this_hidden = dropout_layer(this_hidden)
-        return this_hidden
+        scores = this_hidden
+        #scores = self.activate(this_hidden)
+        #scores = F.sigmoid(this_hidden)
+        return scores
 
     def encode_np(self,sentence_embedding,mention_starts,mention_ends,mention_indeces,mention_mask,dropout=0.0):
         mention_emb_list = []
@@ -100,11 +104,10 @@ class Network(nn.Module):
         this_hidden = self.activate(this_hidden)
         this_hidden = dropout_layer(this_hidden)
         this_hidden = self.np_representation_layer_2(this_hidden)
-        this_hidden = self.activate(this_hidden)
-        scores = dropout_layer(this_hidden)
-
+        scores = this_hidden
+        #scores = self.activate(this_hidden)
+        #scores = F.sigmoid(this_hidden)
         return scores,mention_emb
-
 
     def encode_sentences_dynantic(self,inpt,inpt_len,mask):
         inpt_sort_idx = numpy.argsort(-inpt_len)
@@ -124,7 +127,7 @@ class Network(nn.Module):
         sentence_embedding = sentence_embedding.view(emb_dimention,-1).transpose(0,1)
         return sentence_embedding
 
-    def forward(self,doc,dropout=0.0):
+    def forward(self,doc,dropout=0.0,out=False,np_lamda=0.2,zp_lamda=0.1,train=False):
         mask = torch.tensor(doc.mask).type(torch.cuda.ByteTensor)
         sen_vec = torch.tensor(doc.vec).type(torch.cuda.LongTensor)
         inpt_len = doc.sentence_len
@@ -136,47 +139,50 @@ class Network(nn.Module):
         zp_post_index = torch.tensor(doc.zp_post_index).type(torch.cuda.LongTensor)
         zp_embedding = torch.cat([sentence_embedding[zp_pre_index],sentence_embedding[zp_post_index]],1) #[total_word_num,hidden_dimention*4]
         zp_score = self.encode_zp(zp_embedding,dropout) #[total_word_num,1]
+
+        zp_x_score = self.zp_x_layer(zp_embedding)
+        #zp_x_score = F.sigmoid(zp_x_score)
+        #zp_x_score = self.activate(zp_x_score)
         
         np_index_start = torch.tensor(doc.np_index_start).type(torch.cuda.LongTensor)
         np_index_end = torch.tensor(doc.np_index_end).type(torch.cuda.LongTensor)
         np_indecs = torch.tensor(doc.np_indecs).type(torch.cuda.LongTensor)
         np_mask = torch.tensor(doc.np_mask).type(torch.cuda.FloatTensor)
 
-        np_score,np_embedding = self.encode_np(sentence_embedding,np_index_start,np_index_end,np_indecs,np_mask) #[num_nps,1],[num_nps,hidden_dimention*6+16] 
-        selected_np_indexs = opt.get_candis_by_scores(doc.np_index_start,doc.np_index_end,numpy.squeeze(np_score.data.cpu().numpy()))
-        selected_zp_indexs = opt.get_zps_by_scores(numpy.squeeze(zp_score.data.cpu().numpy())) 
+        np_score,np_embedding = self.encode_np(sentence_embedding,np_index_start,np_index_end,np_indecs,np_mask,dropout) #[num_nps,1],[num_nps,hidden_dimention*6+16] 
+        selected_np_indexs = opt.get_candis_by_scores(doc.train_ante,doc.np_index_start,doc.np_index_end,numpy.squeeze(np_score.data.cpu().numpy()),lamda=np_lamda,train=train)
+        selected_zp_indexs = opt.get_zps_by_scores(doc.train_azp,numpy.squeeze(zp_score.data.cpu().numpy()),lamda=zp_lamda,train=train) 
 
-        zp_reindex,np_reindex,start,end,distance_feature = opt.get_pairs(selected_zp_indexs,selected_np_indexs,doc)
+        zp_reindex,np_reindex,np_reindex_real,start,end,distance_feature = opt.get_pairs(selected_zp_indexs,selected_np_indexs,doc)
         zp_reindex_torch = torch.tensor(zp_reindex).type(torch.cuda.LongTensor)
         np_reindex_torch = torch.tensor(np_reindex).type(torch.cuda.LongTensor)
+        np_reindex_real_torch = torch.tensor(np_reindex_real).type(torch.cuda.LongTensor)
 
         zp_pair_representation = zp_embedding[zp_reindex_torch]
-        np_pair_representation = np_embedding[np_reindex_torch]
-        np_pair_score = np_score[np_reindex_torch]
+        np_pair_representation = np_embedding[np_reindex_real_torch]
+        np_pair_score = np_score[np_reindex_real_torch]
         distance_feature = torch.tensor(distance_feature).type(torch.cuda.LongTensor)
-        pair_score = self.generate_score(zp_pair_representation,np_pair_representation,distance_feature)
-        for s,e in zip(start,end):
-            if s == e:
-                continue
-            this_zp_indexs = zp_reindex_torch[s:e].data.cpu().numpy()[0] #only one zp each time
-            this_np_indexs = np_reindex_torch[s:e].data.cpu().numpy()
-            this_not_zp_score = (1-zp_score[this_zp_indexs]).view(1,1)
-            #this_not_zp_score = torch.zeros(1,1).cuda()
-            this_pair_score = np_pair_score[s:e]+pair_score[s:e]+zp_score[this_zp_indexs]
-            this_score = F.softmax(torch.squeeze(torch.cat( [this_pair_score,this_not_zp_score] )),0)
-            #this_score = F.softmax(torch.squeeze(torch.cat( [pair_score[s:e],torch.zeros(1,1).cuda()] )),0)
+        pair_score = self.generate_score(zp_pair_representation,np_pair_representation,distance_feature,dropout)
 
-            gold = numpy.append(doc.zp_candi_coref[this_zp_indexs][this_np_indexs],doc.zp_candi_coref[this_zp_indexs][-1])
-            gold = torch.tensor(gold).type(torch.cuda.FloatTensor)
-            yield gold,this_score,this_zp_indexs,this_np_indexs
+        #if out:
+        #    print selected_np_indexs
+        #    print selected_zp_indexs
+        #    print zp_reindex
+
+        return start,end,zp_reindex_torch.data.cpu().numpy(),np_reindex_torch.data.cpu().numpy(),np_pair_score,pair_score,zp_score,np_score,zp_x_score
 
     def generate_score(self,zp_embedding,np_embedding,distance_feature,dropout=0.0):
         dropout_layer = nn.Dropout(dropout)
         mention_distance_emb = self.distance_embeddings(distance_feature)
         hidden = self.zp_score_layer(zp_embedding) + self.np_score_layer(np_embedding) + self.feature_score_layer(mention_distance_emb)
         hidden = self.activate(hidden)
+        hidden = dropout_layer(hidden)
         hidden = self.hidden_score_layer_1(hidden)
         hidden = self.activate(hidden)
+        hidden = dropout_layer(hidden)
         score = self.hidden_score_layer_2(hidden)
+        #score = self.activate(score)
+        #score = F.sigmoid(score)
         return score
+
 

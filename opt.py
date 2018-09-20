@@ -54,8 +54,8 @@ def generate_NP_index(inpt_len,MAX=10):
     #mention_indices = np.minimum(mention_indices,len()-1)
     return np.array(start_index),np.array(end_index),mention_indices,np.array(mask),sen2index,np2real
 
-def get_candis_by_scores(starts,ends,scores,lamda=0.5):
-    num_output_mentions = int(len(starts)*lamda)
+def get_candis_by_scores(gold_np,starts,ends,scores,lamda=0.3,train=False):
+    num_output_mentions = min(int(len(starts)*lamda)+1,len(starts))
     sorted_index = numpy.argsort(scores)[::-1]
     top_mention_indices = []
     current_mention_index = 0 
@@ -66,9 +66,15 @@ def get_candis_by_scores(starts,ends,scores,lamda=0.5):
             if is_crossing(starts,ends,i,j):
                 any_crossing = True
                 break
-        #if not any_crossing:
-        top_mention_indices.append(i)
+        if not any_crossing:
+            top_mention_indices.append(i)
         current_mention_index += 1
+    if train:
+        for i in gold_np:
+            if not i in top_mention_indices:
+                top_mention_indices = numpy.append(top_mention_indices,i)
+                #top_mention_indices.append(i) 
+
     top_mention_indices.sort()
     return top_mention_indices
 
@@ -79,16 +85,24 @@ def is_crossing(starts,ends,i,j):
     e2 = starts[j]
     return (s1 < s2 and s2 <= e1 and e1 < e2) or (s2 < s1 and s1 <= e2 and e2 < e1) 
 
-def get_zps_by_scores(scores,lamda=0.5):
-    num_output_mentions = int(len(scores)*lamda)
+def get_zps_by_scores(gold,scores,lamda=0.1,train=False):
+    num_output_mentions = min(int(len(scores)*lamda)+1,len(scores))
     sorted_index = numpy.argsort(scores)[::-1]
     top_mention_indices = sorted_index[:num_output_mentions]
+
+    if train:
+        for i in gold:
+            if not i in top_mention_indices:
+                top_mention_indices = numpy.append(top_mention_indices,i) 
+
     top_mention_indices.sort()
+
     return top_mention_indices.copy()
 
 def get_pairs(selected_zp_indexs,selected_np_indexs,doc):
     zp_reindex = []
     np_reindex = []
+    np_reindex_real = []
     distance_feature = []
     start = []
     end = []
@@ -104,11 +118,14 @@ def get_pairs(selected_zp_indexs,selected_np_indexs,doc):
                 if candi_index > max_candi_index:
                     break
                 if candi_index in candi_indexes:
+                    this_candi_index_in_candi_list = candi_indexes.index(candi_index)
                     zp_reindex.append(zp_index)
-                    np_reindex.append(candi_index) 
-                    distance_feature.append(doc.zp_candi_distance_dict[(zp_index,candi_index)])
-                    if candi_index < this_small:
-                        this_small = candi_index
+                    np_reindex.append(this_candi_index_in_candi_list) 
+                    np_reindex_real.append(candi_index) 
+                    distance_feature.append(doc.zp_candi_distance_dict[zp_index][this_candi_index_in_candi_list])
+                    #if candi_index < this_small:
+                    if j < this_small:
+                        this_small = j
 
             if this_small < 1000000:
                 smallest = this_small
@@ -116,5 +133,4 @@ def get_pairs(selected_zp_indexs,selected_np_indexs,doc):
         if not s == e:
             start.append(s)
             end.append(e)
-
-    return zp_reindex,np_reindex,start,end,distance_feature
+    return zp_reindex,np_reindex,np_reindex_real,start,end,distance_feature
